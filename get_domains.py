@@ -10,6 +10,7 @@ import socket
 import urllib3
 
 import click
+
 try:
     import boto3
     from botocore.config import Config as BotoConfig
@@ -18,7 +19,6 @@ except ModuleNotFoundError:
     BOTO = False
 from jinja2 import Environment, BaseLoader
 import requests
-
 
 CONTEXT_SETTINGS = dict(help_option_names=['-h', '--help'])
 LOCAL_TIMEZONE = datetime.datetime.now().astimezone().tzinfo
@@ -44,6 +44,7 @@ class Domain:
     """A generic class for domain information regardless of the provider.
     Different providers return different pieces of information;
     not every domain will have every piece of information."""
+
     def __init__(self, name, registrar):
         self.auto_renew = None
         self.contact = None
@@ -88,6 +89,7 @@ class AWSClient:
     The first retrieves all domains, the second retrieves information about specific domains
     on a per-domain basis.
     """
+
     def __init__(self, proxy, access_key_id, secret_access_key):
         self.domains = []
         self.proxy = {'https': 'http://' + proxy} if proxy else None
@@ -135,6 +137,7 @@ class AzureClient:
     The first retrieves a bearer token for subsequent API calls,
     the second retrieves information about domains.
     """
+
     def __init__(self, proxy, app_id, tenant, client_secret, subscription):
         self.domains = []
         self.proxy = {'https': 'http://' + proxy} if proxy else None
@@ -193,6 +196,7 @@ class GoDaddyClient:
     Involves one API calls using Python requests, which
     retrieves information about the account's domains.
     """
+
     def __init__(self, proxy, api_key, secret):
         self.domains = []
         self.proxy = {'https': 'http://' + proxy} if proxy else None
@@ -223,6 +227,7 @@ class GoDaddyClient:
 
 class NamecheapClient:
     """Not implemented."""
+
     def __init__(self, proxy, api_key, username, api_username, client_ip, page_size=10):
         self.domains = []
         self.proxy = {'https': 'http://' + proxy} if proxy else None
@@ -238,6 +243,7 @@ class SlackClient:
     """Class for posting messages to a Slack.
     The only required configuration parameter is webhook_url.
     """
+
     def __init__(self, proxy, message, webhook_url, username, channel, alert_target, emoji):
         self.proxy = {'https': 'http://' + proxy} if proxy else None
         self.verify = False if proxy else True
@@ -289,8 +295,12 @@ def serialize(obj):
 @click.option('-c', '--csv-file', metavar='csv', help='Save output to CSV.')
 @click.option('-s', '--slack', is_flag=True, help='Send domain information to slack.')
 @click.option('-x', '--show-expired', is_flag=True, help='Include expired domains in output.')
+@click.option('-a', '--attr', type=click.Choice(['auto_renew', 'contact', 'created', 'dns', 'expired', 'expires', 'id',
+                                                 'locked', 'name', 'nameservers', 'privacy', 'registrar', 'remaining',
+                                                 'resolves_to'], case_sensitive=False),
+              multiple=True, help='Specific domain attributes to print to terminal.')
 @click.argument('config', type=click.Path(exists=True))
-def main(config, providers, json_file, csv_file, slack, show_expired):
+def main(config, providers, json_file, csv_file, slack, show_expired, attr):
     """Retrieve domains from different providers.
 
     CONFIG is the path to the configuration file containing API credential material.
@@ -342,14 +352,19 @@ def main(config, providers, json_file, csv_file, slack, show_expired):
         template = Environment(loader=BaseLoader).from_string(TEMPLATE)
         message = template.render(domains=domains, show_expired=show_expired)
 
-        click.secho(message)
-
         # Slack only needs webhook
         if slack and config_dict['Slack']['webhook_url']:  # and domains:
             slack_client = SlackClient(proxy, '```\n' + message + '\n```', **config_dict['Slack'])
 
-        if json_file or csv_file:
+        if json_file or csv_file or attr:
             domains = [serialize(domain).__dict__ for domain in domains]
+
+        if attr:
+            for domain in domains:
+                for a in attr:
+                    print(domain[a]) if (attr.index(a) == len(attr) - 1) else print(domain[a], end=',')
+        else:
+            click.secho(message)
 
         if json_file:
             with open(json_file, 'w') as f:

@@ -46,8 +46,18 @@ By default, the script does not display information about expired domains to Sla
 
 To save output as CSV or JSON, pass the `-c / --csv-file` or `-j / --json-file` arguments along with the desired filename.
 
-`python get_domains.py -c domains.csv -j domains.json`
+`python get_domains.py -c domains.csv -j domains.json /path/to/config`
 
 The CSV and JSON files contain all retrieved information for each domain, whereas the Slack messages and terminal output include specific pieces of information.
+
+To print specific attributes / properties of the retrieved domains, pass the `-a / --attr` argument. You can pass the argument multiple times to specify multiple attributes. This suppresses the formatted message in place of a common-separated list of attributes. Useful if you want to return specific information or only want a list of domain names.
+
+To display names only:
+
+`python get_domains.py --attr name /path/to/config`
+
+To display names, expiration dates, and registrars:
+
+`python get_domains.py -a name -a expires -a registrar /path/to/config`
 
 
