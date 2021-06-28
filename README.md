@@ -40,5 +40,14 @@ To control what providers the script queries, you can specify them on the comman
 
 This setting overrides the configuration file, so even if the configuration file includes authentication material for all providers, the script only queries those listed.
 
+By default, the script does not display information about expired domains to Slack or the terminal (though it includes expired domains in CSV and JSON output). To include expired domains in the output, pass the `-x / --show-expired` flag:
+
+`python get_domains.py -p godaddy -x /path/to/config`
+
+To save output as CSV or JSON, pass the `-c / --csv-file` or `-j / --json-file` arguments along with the desired filename.
+
+`python get_domains.py -c domains.csv -j domains.json`
+
+The CSV and JSON files contain all retrieved information for each domain, whereas the Slack messages and terminal output include specific pieces of information.
 
 

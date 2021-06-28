@@ -1,11 +1,8 @@
-# Disassociating domain retrieval from domain checking
-# This script retrieves domains from different providers
-# and normalizes the information
-
-# TODO: Filter list for domains applicable?
-# TODO: Different output options? (CSV, JSON, stdout, plaintext list)
+# TODO: Consider filter list for getting information about specific domains only
+# TODO: Implement paging
 
 import configparser
+import csv
 import datetime
 import dateutil.parser
 import json
@@ -13,30 +10,40 @@ import socket
 import urllib3
 
 import click
+try:
+    import boto3
+    from botocore.config import Config as BotoConfig
+    BOTO = True
+except ModuleNotFoundError:
+    BOTO = False
 from jinja2 import Environment, BaseLoader
 import requests
 
+
 CONTEXT_SETTINGS = dict(help_option_names=['-h', '--help'])
 LOCAL_TIMEZONE = datetime.datetime.now().astimezone().tzinfo
-SLACK_TEMPLATE = """
-```
+TEMPLATE = """
 ╒═════════════════════════╤═════════════╤═════════════╤═══════════╤═══════╤═══════════════════╕
 │ Name                    │ Registrar   │ Expires     │ Remaining │ Auto  │ Resolves to       │
 ╞═════════════════════════╪═════════════╪═════════════╪═══════════╪═══════╪═══════════════════╡ 
 {% for domain in domains -%}
+{% if (not domain.expired) or (domain.expired and show_expired == True) -%}
 │ {{ '%-24s'|format(domain.name[:24]) -}}
 │ {{ '%-12s'|format(domain.registrar) -}}
 │ {{ '%-12s'|format(domain.expires.strftime('%d %b %Y')) -}}
 │ {{ '%-10s'|format(domain.remaining) -}}
 │ {{ '%-6s' |format(domain.auto_renew) -}}
 │ {{ '%-18s'|format(domain.resolves_to) -}}│
+{% endif -%}
 {% endfor -%}
 ╘═════════════════════════╧═════════════╧═════════════╧═══════════╧═══════╧═══════════════════╛
-```
 """
 
 
 class Domain:
+    """A generic class for domain information regardless of the provider.
+    Different providers return different pieces of information;
+    not every domain will have every piece of information."""
     def __init__(self, name, registrar):
         self.auto_renew = None
         self.contact = None
@@ -44,7 +51,7 @@ class Domain:
         self.dns = None
         self.expires = None
         self.id = None
-        self.is_expired = None
+        self.expired = None
         self.locked = None
         self.name = name
         self.nameservers = None
@@ -53,19 +60,40 @@ class Domain:
         self.remaining = None
         self.resolves_to = None
 
+    def get_expired(self):
+        # Can't compare timezone-aware and timezone-naive timestamps
+        # So if timestamp returned from API is timezone-naive, assume it's UTC and set it that way
+        if self.expires.tzinfo is None or self.expires.tzinfo.utcoffset(self.expires) is None:
+            self.expires = self.expires.replace(tzinfo=datetime.timezone.utc)
+        now = datetime.datetime.now(LOCAL_TIMEZONE)
+        self.expired = True if now > self.expires else False
+
+    def get_remaining(self):
+        now = datetime.datetime.now(LOCAL_TIMEZONE)
+        if not self.expired:  # Capture the remaining registration time in days
+            self.remaining = (self.expires - now).days
+        else:
+            self.remaining = 0
+
+    def get_resolves_to(self):
+        try:
+            self.resolves_to = socket.gethostbyname(self.name)
+        except socket.gaierror:
+            self.resolves_to = None
+
 
 class AWSClient:
+    """Class for retrieving domain information from AWS Route 53.
+    Involves two API calls using the boto3 library.
+    The first retrieves all domains, the second retrieves information about specific domains
+    on a per-domain basis.
+    """
     def __init__(self, proxy, access_key_id, secret_access_key):
         self.domains = []
         self.proxy = {'https': 'http://' + proxy} if proxy else None
         self.verify = False if proxy else True
         self.access_key_id = access_key_id
         self.secret_access_key = secret_access_key
-        try:
-            import boto3
-            from botocore.config import Config as BotoConfig
-        except ModuleNotFoundError:
-            click.secho('[-] boto3 library not found. Retrieving AWS domains requires boto3.', fg='red', bold=True)
         self.client = boto3.client('route53domains',
                                    aws_access_key_id=self.access_key_id,
                                    aws_secret_access_key=self.secret_access_key,
@@ -79,12 +107,8 @@ class AWSClient:
         for entry in resp['Domains']:
             domain = Domain(entry['DomainName'], 'AWS')
             domain.expires = entry['Expiry']
-            now = datetime.datetime.now(LOCAL_TIMEZONE)
-            domain.is_expired = True if now > domain.expires else False
-            if not domain.is_expired:  # Capture the remaining registration time in days
-                domain.remaining = (domain.expires - now).days
-            else:
-                domain.remaining = 'Expired'
+            domain.get_expired()
+            domain.get_remaining()
             domain.auto_renew = entry['AutoRenew']
             domain.locked = entry['TransferLock']
             self.domains.append(domain)
@@ -102,13 +126,15 @@ class AWSClient:
             tech_privacy = resp['TechPrivacy']
             domain.privacy = f'Admin: {admin_privacy}; Registrant: {registrant_privacy}; Tech: {tech_privacy}'
             domain.nameservers = ', '.join([list(x.values())[0] for x in resp['Nameservers']])
-            try:
-                domain.resolves_to = socket.gethostbyname(domain.name)
-            except socket.gaierror:
-                domain.resolves_to = None
+            domain.get_resolves_to()
 
 
 class AzureClient:
+    """Class for retrieving domain information from Microsoft Azure.
+    Involves two API calls using Python requests.
+    The first retrieves a bearer token for subsequent API calls,
+    the second retrieves information about domains.
+    """
     def __init__(self, proxy, app_id, tenant, client_secret, subscription):
         self.domains = []
         self.proxy = {'https': 'http://' + proxy} if proxy else None
@@ -123,7 +149,6 @@ class AzureClient:
         self.app_service_endpoint = f'https://management.azure.com/subscriptions/{self.subscription}' \
                                     f'/providers/Microsoft.DomainRegistration/domains?api-version={self.api_version}'
         self.resource = 'https://management.azure.com/'
-
         self.bearer_token = None
         self.authenticate()
         self.get_domains()
@@ -151,26 +176,23 @@ class AzureClient:
         for entry in domains:
             domain = Domain(name=entry['name'], registrar='Azure')
             domain.id = entry['id']
-            domain.created = datetime.datetime.strptime(entry['properties']['createdTime'], '%Y-%m-%dT%H:%M:%S')
-            domain.expires = datetime.datetime.strptime(entry['properties']['expirationTime'], '%Y-%m-%dT%H:%M:%S')
-            now = datetime.datetime.now()
-            domain.expired = True if now > domain.expires else False
-            if not domain.is_expired:  # Capture the remaining registration time in days
-                domain.remaining = (domain.expires - now).days
-            else:
-                domain.remaining = 'Expired'
+            domain.created = dateutil.parser.parse(entry['properties']['createdTime'])
+            domain.expires = dateutil.parser.parse(entry['properties']['expirationTime'])
+            domain.get_expired()
+            domain.get_remaining()
             domain.auto_renew = entry['properties']['autoRenew']
             domain.privacy = entry['properties']['privacy']
             domain.dns = entry['properties']['dnsType']
             domain.nameservers = entry['properties']['nameServers']
-            try:
-                domain.resolves_to = socket.gethostbyname(domain.name)
-            except socket.gaierror:
-                domain.resolves_to = None
+            domain.get_resolves_to()
             self.domains.append(domain)
 
 
 class GoDaddyClient:
+    """Class for retrieving domain information from GoDaddy.
+    Involves one API calls using Python requests, which
+    retrieves information about the account's domains.
+    """
     def __init__(self, proxy, api_key, secret):
         self.domains = []
         self.proxy = {'https': 'http://' + proxy} if proxy else None
@@ -189,24 +211,18 @@ class GoDaddyClient:
             domain.id = entry['domainId']
             domain.created = dateutil.parser.parse(entry['createdAt'])
             domain.expires = dateutil.parser.parse(entry['expires'])
-            now = datetime.datetime.now(LOCAL_TIMEZONE)
-            domain.is_expired = True if now > domain.expires else False
-            if not domain.is_expired:
-                domain.remaining = (domain.expires - now).days
-            else:
-                domain.remaining = 'Expired'
+            domain.get_expired()
+            domain.get_remaining()
             domain.locked = entry['locked']
             domain.auto_renew = entry['renewAuto']
             domain.privacy = entry['privacy']
             domain.nameservers = entry['nameServers']
-            try:
-                domain.resolves_to = socket.gethostbyname(domain.name)
-            except socket.gaierror:
-                domain.resolves_to = None
+            domain.get_resolves_to()
             self.domains.append(domain)
 
 
 class NamecheapClient:
+    """Not implemented."""
     def __init__(self, proxy, api_key, username, api_username, client_ip, page_size=10):
         self.domains = []
         self.proxy = {'https': 'http://' + proxy} if proxy else None
@@ -219,6 +235,9 @@ class NamecheapClient:
 
 
 class SlackClient:
+    """Class for posting messages to a Slack.
+    The only required configuration parameter is webhook_url.
+    """
     def __init__(self, proxy, message, webhook_url, username, channel, alert_target, emoji):
         self.proxy = {'https': 'http://' + proxy} if proxy else None
         self.verify = False if proxy else True
@@ -241,6 +260,10 @@ class SlackClient:
 
 
 def read_config(config_file):
+    """Read a configuration file and return a dict of dicts.
+    Outer dict keys represent config section headers.
+    Inner dicts are config parameters and values.
+    """
     config = configparser.ConfigParser()
     config.read(config_file)
     config_dict = {x: {} for x in config.sections()}
@@ -250,15 +273,27 @@ def read_config(config_file):
     return config_dict
 
 
+def serialize(obj):
+    """Change datetime.datetime objects to ISO-format strings and return the updated object."""
+    for k, v in vars(obj).items():
+        if isinstance(v, datetime.datetime):
+            setattr(obj, k, v.isoformat())
+    return obj
+
+
 @click.command(context_settings=CONTEXT_SETTINGS)
 @click.option('-p', '--providers',
               type=click.Choice(choices=['AWS', 'Azure', 'GoDaddy', 'Namecheap'], case_sensitive=False), multiple=True,
               help='Specific providers to query. Can list multiple providers each prepended with "-p"')
+@click.option('-j', '--json-file', help='Save output to JSON.')
+@click.option('-c', '--csv-file', metavar='csv', help='Save output to CSV.')
+@click.option('-s', '--slack', is_flag=True, help='Send domain information to slack.')
+@click.option('-x', '--show-expired', is_flag=True, help='Include expired domains in output.')
 @click.argument('config', type=click.Path(exists=True))
-def main(config, providers):
+def main(config, providers, json_file, csv_file, slack, show_expired):
     """Retrieve domains from different providers.
 
-    CONFIG is the path to the configuration file.
+    CONFIG is the path to the configuration file containing API credential material.
 
     """
 
@@ -270,6 +305,10 @@ def main(config, providers):
 
     config_dict = read_config(config)
 
+    if slack and not config_dict['Slack']['webhook_url']:
+        click.secho(f'[-] Slack webhook URL missing from {config}. Information will not be sent to Slack.', fg='red',
+                    bold=True)
+
     # Currently no validation of proxy address
     proxy = config_dict['Proxy']['proxy_ip']
     if proxy:
@@ -277,6 +316,9 @@ def main(config, providers):
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
     if all(config_dict['AWS'].values()) and 'AWS' in providers:
+        if not BOTO:
+            click.secho('[-] boto3 library not found. Retrieving AWS domains requires boto3.', fg='red', bold=True)
+            pass
         aws_client = AWSClient(proxy, **config_dict['AWS'])
         domains.extend(aws_client.domains)
 
@@ -292,15 +334,35 @@ def main(config, providers):
         godaddy_client = GoDaddyClient(proxy, **config_dict['GoDaddy'])
         domains.extend(godaddy_client.domains)
 
-    # Sort domains ascending by number of days remaining
-    # To sort by name: domains.sort(key=lambda x: x.name
-    domains.sort(key=lambda x: x.remaining)
+    if domains:
+        # Sort domains ascending by number of days remaining
+        # To sort by name: domains.sort(key=lambda x: x.name)
+        domains.sort(key=lambda x: x.remaining)
 
-    # Slack only needs webhook
-    if config_dict['Slack']['webhook_url']:  # and domains:
-        template = Environment(loader=BaseLoader).from_string(SLACK_TEMPLATE)
-        message = template.render(domains=domains)
-        slack_client = SlackClient(proxy, message, **config_dict['Slack'])
+        template = Environment(loader=BaseLoader).from_string(TEMPLATE)
+        message = template.render(domains=domains, show_expired=show_expired)
+
+        click.secho(message)
+
+        # Slack only needs webhook
+        if slack and config_dict['Slack']['webhook_url']:  # and domains:
+            slack_client = SlackClient(proxy, '```\n' + message + '\n```', **config_dict['Slack'])
+
+        if json_file or csv_file:
+            domains = [serialize(domain).__dict__ for domain in domains]
+
+        if json_file:
+            with open(json_file, 'w') as f:
+                json.dump(domains, f)
+
+        if csv_file:
+            with open(csv_file, 'w', newline='') as f:
+                fieldnames = ['name', 'auto_renew', 'contact', 'created', 'dns', 'expired', 'expires', 'id', 'locked',
+                              'nameservers', 'privacy', 'registrar', 'remaining', 'resolves_to']
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                for domain in domains:
+                    writer.writerow(domain)
 
 
 if __name__ == '__main__':
