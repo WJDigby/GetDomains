@@ -50,7 +50,7 @@ To save output as CSV or JSON, pass the `-c / --csv-file` or `-j / --json-file` 
 
 The CSV and JSON files contain all retrieved information for each domain, whereas the Slack messages and terminal output include specific pieces of information.
 
-To print specific attributes / properties of the retrieved domains, pass the `-a / --attr` argument. You can pass the argument multiple times to specify multiple attributes. This suppresses the formatted message in place of a common-separated list of attributes. Useful if you want to return specific information or only want a list of domain names.
+To print specific attributes / properties of the retrieved domains, pass the `-a / --attr` argument. You can pass the argument multiple times to specify multiple attributes. This suppresses the formatted message in place of a comma-separated list of attributes. Useful if you want to return specific information or only want a list of domain names.
 
 To display names only:
 

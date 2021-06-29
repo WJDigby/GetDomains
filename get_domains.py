@@ -63,7 +63,7 @@ class Domain:
 
     def get_expired(self):
         # Can't compare timezone-aware and timezone-naive timestamps
-        # So if timestamp returned from API is timezone-naive, assume it's UTC and set it that way
+        # So if timestamp returned from API is timezone-naive, assume it's UTC and make it so
         if self.expires.tzinfo is None or self.expires.tzinfo.utcoffset(self.expires) is None:
             self.expires = self.expires.replace(tzinfo=datetime.timezone.utc)
         now = datetime.datetime.now(LOCAL_TIMEZONE)
@@ -326,11 +326,11 @@ def main(config, providers, json_file, csv_file, slack, show_expired, attr):
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
     if all(config_dict['AWS'].values()) and 'AWS' in providers:
-        if not BOTO:
+        if BOTO:
+            aws_client = AWSClient(proxy, **config_dict['AWS'])
+            domains.extend(aws_client.domains)
+        else:
             click.secho('[-] boto3 library not found. Retrieving AWS domains requires boto3.', fg='red', bold=True)
-            pass
-        aws_client = AWSClient(proxy, **config_dict['AWS'])
-        domains.extend(aws_client.domains)
 
     if all(config_dict['Azure'].values()) and 'Azure' in providers:
         azure_client = AzureClient(proxy, **config_dict['Azure'])
@@ -354,7 +354,7 @@ def main(config, providers, json_file, csv_file, slack, show_expired, attr):
 
         # Slack only needs webhook
         if slack and config_dict['Slack']['webhook_url']:  # and domains:
-            slack_client = SlackClient(proxy, '```\n' + message + '\n```', **config_dict['Slack'])
+            SlackClient(proxy, '```\n' + message + '\n```', **config_dict['Slack'])
 
         if json_file or csv_file or attr:
             domains = [serialize(domain).__dict__ for domain in domains]
